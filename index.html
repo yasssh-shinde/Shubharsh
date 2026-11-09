@@ -1763,6 +1763,8 @@ let audioElem = null;
 let synthAudioContext = null;
 let synthOscillators = [];
 let synthGain = null;
+let synthMusicStarted = false;
+let synthMelodyTimer = null;
 
 function initAudioSystem() {
   audioElem = document.getElementById('wedding-audio');
@@ -1782,8 +1784,9 @@ function initAudioSystem() {
 
   if (audioElem) {
     audioElem.addEventListener('ended', () => {
+      if (!isPlayingMusic) return;
       audioElem.currentTime = 0;
-      audioElem.play().catch(() => {});
+      audioElem.play().catch(handleAudioPlaybackFailure);
     });
   }
 }
@@ -1793,21 +1796,39 @@ function playBackgroundMusic() {
   const musicLabel = document.getElementById('music-label');
   isPlayingMusic = true;
 
-  if (eqBars) eqBars.classList.add('playing');
-  if (musicLabel) musicLabel.textContent = 'Music Playing';
+  if (eqBars) eqBars.classList.remove('playing');
+  if (musicLabel) musicLabel.textContent = 'Starting music...';
 
   if (audioElem) {
     audioElem.volume = 0.65;
-    const playPromise = audioElem.play();
-    if (playPromise !== undefined) {
-      playPromise.catch((err) => {
-        console.log('Audio file blocked or offline, starting Indian raga procedural synthesizer:', err);
-        startProceduralWeddingMusic();
-      });
+    prepareProceduralAudio();
+    try {
+      const playPromise = audioElem.play();
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise.then(() => {
+          if (!isPlayingMusic) {
+            audioElem.pause();
+            return;
+          }
+          if (musicLabel) musicLabel.textContent = 'Music Playing';
+          if (eqBars) eqBars.classList.add('playing');
+        }).catch(handleAudioPlaybackFailure);
+      } else {
+        if (musicLabel) musicLabel.textContent = 'Music Playing';
+        if (eqBars) eqBars.classList.add('playing');
+      }
+    } catch (error) {
+      handleAudioPlaybackFailure(error);
     }
   } else {
     startProceduralWeddingMusic();
   }
+}
+
+function handleAudioPlaybackFailure(error) {
+  if (!isPlayingMusic) return;
+  console.warn('Wedding audio could not be played; trying the built-in instrumental instead.', error);
+  startProceduralWeddingMusic();
 }
 
 function pauseBackgroundMusic() {
@@ -1824,81 +1845,127 @@ function pauseBackgroundMusic() {
   stopProceduralWeddingMusic();
 }
 
-// Procedural soothing Indian raga flute & tanpura synthesizer
-function startProceduralWeddingMusic() {
-  if (synthAudioContext && synthAudioContext.state === 'running') return;
-
+function prepareProceduralAudio() {
   try {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-    synthAudioContext = new AudioContext();
+    if (!AudioContext) return null;
+    if (!synthAudioContext || synthAudioContext.state === 'closed') {
+      synthAudioContext = new AudioContext();
+      synthGain = synthAudioContext.createGain();
+      synthGain.gain.setValueAtTime(0.08, synthAudioContext.currentTime);
 
-    synthGain = synthAudioContext.createGain();
-    synthGain.gain.setValueAtTime(0.08, synthAudioContext.currentTime);
+      const filter = synthAudioContext.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(650, synthAudioContext.currentTime);
+      synthGain.connect(filter);
+      filter.connect(synthAudioContext.destination);
+    }
 
-    // Warm low-pass filter to sound organic & warm like a bansuri / shehnai
-    const filter = synthAudioContext.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(650, synthAudioContext.currentTime);
+    if (synthAudioContext.state === 'suspended') {
+      synthAudioContext.resume().catch((error) => {
+        console.warn('Could not unlock the built-in music on this device.', error);
+      });
+    }
+    return synthAudioContext;
+  } catch (error) {
+    console.error('Could not prepare the built-in wedding music.', error);
+    return null;
+  }
+}
 
-    synthGain.connect(filter);
-    filter.connect(synthAudioContext.destination);
+// Start the fallback after its audio context has been unlocked by the tap.
+function startProceduralWeddingMusic() {
+  const context = prepareProceduralAudio();
+  if (!context) {
+    isPlayingMusic = false;
+    const musicLabel = document.getElementById('music-label');
+    if (musicLabel) musicLabel.textContent = 'Tap to retry music';
+    return;
+  }
 
-    // Tanpura drone base frequencies (C# / Pancham root: C#4, G#3, C#3)
+  const start = () => {
+    if (!isPlayingMusic || context.state !== 'running' || synthMusicStarted) return;
+    synthMusicStarted = true;
+
+    const eqBars = document.getElementById('equalizer-bars');
+    const musicLabel = document.getElementById('music-label');
+    if (eqBars) eqBars.classList.add('playing');
+    if (musicLabel) musicLabel.textContent = 'Music Playing';
+
     const baseFreqs = [138.59, 207.65, 277.18];
     baseFreqs.forEach((freq, idx) => {
-      const osc = synthAudioContext.createOscillator();
+      const osc = context.createOscillator();
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(freq, synthAudioContext.currentTime);
+      osc.frequency.setValueAtTime(freq, context.currentTime);
 
-      const oscGain = synthAudioContext.createGain();
-      oscGain.gain.setValueAtTime(0.035 / (idx + 1), synthAudioContext.currentTime);
-
+      const oscGain = context.createGain();
+      oscGain.gain.setValueAtTime(0.035 / (idx + 1), context.currentTime);
       osc.connect(oscGain);
       oscGain.connect(synthGain);
       osc.start();
       synthOscillators.push(osc);
     });
 
-    // Gentle raga melodic notes (Bhairavi / Yaman auspicious wedding notes)
     const ragaNotes = [277.18, 311.13, 349.23, 369.99, 415.3, 466.16, 523.25, 554.37];
-    let noteIdx = 0;
-
-    const melodyTimer = setInterval(() => {
-      if (!isPlayingMusic || !synthAudioContext || synthAudioContext.state !== 'running') {
-        clearInterval(melodyTimer);
+    synthMelodyTimer = setInterval(() => {
+      if (!isPlayingMusic || context.state !== 'running') {
+        clearInterval(synthMelodyTimer);
+        synthMelodyTimer = null;
         return;
       }
 
       const noteFreq = ragaNotes[Math.floor(Math.random() * ragaNotes.length)];
-      const noteOsc = synthAudioContext.createOscillator();
+      const noteOsc = context.createOscillator();
       noteOsc.type = 'sine';
-      noteOsc.frequency.setValueAtTime(noteFreq, synthAudioContext.currentTime);
+      noteOsc.frequency.setValueAtTime(noteFreq, context.currentTime);
 
-      const noteEnv = synthAudioContext.createGain();
-      const now = synthAudioContext.currentTime;
+      const noteEnv = context.createGain();
+      const now = context.currentTime;
       noteEnv.gain.setValueAtTime(0.001, now);
       noteEnv.gain.linearRampToValueAtTime(0.05, now + 0.4);
       noteEnv.gain.exponentialRampToValueAtTime(0.0001, now + 2.2);
-
       noteOsc.connect(noteEnv);
       noteEnv.connect(synthGain);
       noteOsc.start(now);
       noteOsc.stop(now + 2.4);
     }, 1800);
+  };
 
-  } catch (err) {
-    console.error('Synthesizer init failed:', err);
+  if (context.state === 'running') {
+    start();
+  } else {
+    context.resume().then(start).catch((error) => {
+      if (!isPlayingMusic) return;
+      console.error('Could not start the built-in wedding music.', error);
+      isPlayingMusic = false;
+      const musicLabel = document.getElementById('music-label');
+      if (musicLabel) musicLabel.textContent = 'Tap to retry music';
+    });
   }
 }
 
 function stopProceduralWeddingMusic() {
-  if (synthAudioContext) {
+  if (synthMelodyTimer) {
+    clearInterval(synthMelodyTimer);
+    synthMelodyTimer = null;
+  }
+  synthMusicStarted = false;
+  synthOscillators.forEach((osc) => {
     try {
-      synthAudioContext.close();
-      synthAudioContext = null;
-      synthOscillators = [];
-    } catch (e) {}
+      osc.stop();
+    } catch (error) {
+      console.warn('Could not stop a built-in music oscillator.', error);
+    }
+  });
+  synthOscillators = [];
+
+  if (synthAudioContext) {
+    const context = synthAudioContext;
+    synthAudioContext = null;
+    synthGain = null;
+    context.close().catch((error) => {
+      console.warn('Could not close the built-in music audio context.', error);
+    });
   }
 }
 
